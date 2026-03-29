@@ -1,66 +1,38 @@
 #!/usr/bin/env bash
-# status.sh -- Status line interpolation script
-# Called by tmux via #(path/to/status.sh) in status-right.
-# Reads daemon state and renders colored indicators.
+set -euo pipefail
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$CURRENT_DIR/variables.sh"
 
-STATE_FILE="$OPENCODE_STATE_DIR/state"
-PERM_FILE="$OPENCODE_STATE_DIR/permissions"
+# Read pill from tmux option: "state|count"
+pill=$(tmux show-option -gqv "$OPENCODE_PILL_OPTION" 2>/dev/null)
+state="${pill%%|*}"
+count="${pill#*|}"
+: "${state:=idle}" "${count:=0}"
 
-# Exit silently if no state file yet
-[[ ! -f "$STATE_FILE" ]] && exit 0
-
-# Read colors from tmux options (with defaults)
 get_opt() {
-    local val
-    val=$(tmux show-option -gqv "$1" 2>/dev/null)
-    echo "${val:-$2}"
+  local val
+  val=$(tmux show-option -gqv "$1" 2>/dev/null)
+  echo "${val:-$2}"
 }
 
-COLOR_PERM=$(get_opt "$OPENCODE_COLOR_PERMISSION_OPTION" "$OPENCODE_COLOR_PERMISSION_DEFAULT")
-COLOR_IDLE=$(get_opt "$OPENCODE_COLOR_IDLE_OPTION" "$OPENCODE_COLOR_IDLE_DEFAULT")
-COLOR_ERROR=$(get_opt "$OPENCODE_COLOR_ERROR_OPTION" "$OPENCODE_COLOR_ERROR_DEFAULT")
-COLOR_FG=$(get_opt "$OPENCODE_COLOR_FG_OPTION" "$OPENCODE_COLOR_FG_DEFAULT")
+color_yellow=$(get_opt "@thm_yellow" "#f9e2af")
+color_blue=$(get_opt "@thm_blue" "#89b4fa")
+color_green=$(get_opt "@thm_green" "#a6e3a1")
+color_crust=$(get_opt "@thm_crust" "#1e1e2e")
+color_text=$(get_opt "@thm_fg" "#dadada")
 
-# Count sessions with pending permissions
-perm_count=0
-if [[ -f "$PERM_FILE" && -s "$PERM_FILE" ]]; then
-    # Count unique session IDs that have pending permissions
-    perm_count=$(cut -d'|' -f1 "$PERM_FILE" | sort -u | wc -l)
+# No sessions: transparent bg, white fg
+if [[ "$count" == "0" ]]; then
+  printf '#[fg=%s,bg=default] #[fg=%s,bg=default]󰚩  %s#[default] ' "$color_text" "$color_text" "$count"
+  exit 0
 fi
 
-# Count sessions by status (excluding those already counted as permission-pending)
-idle_count=0
-error_count=0
+case "$state" in
+permission) bg="$color_yellow" ;;
+running) bg="$color_blue" ;;
+*) bg="$color_green" ;;
+esac
 
-if [[ -s "$STATE_FILE" ]]; then
-    if [[ $perm_count -gt 0 ]]; then
-        # Get session IDs with permissions to exclude from idle count
-        perm_sids=$(cut -d'|' -f1 "$PERM_FILE" | sort -u)
-        idle_count=$(awk -F'|' '$2 == "idle"' "$STATE_FILE" | while IFS='|' read -r sid _rest; do
-            echo "$perm_sids" | grep -qx "$sid" || echo "$sid"
-        done | wc -l)
-    else
-        idle_count=$(awk -F'|' '$2 == "idle"' "$STATE_FILE" | wc -l)
-    fi
-    error_count=$(awk -F'|' '$2 == "error"' "$STATE_FILE" | wc -l)
-fi
-
-# Build output -- only show segments with non-zero counts
-output=""
-
-if (( perm_count > 0 )); then
-    output+="#[bg=${COLOR_PERM},fg=${COLOR_FG},bold]  ${perm_count} #[default]"
-fi
-
-if (( error_count > 0 )); then
-    output+="#[bg=${COLOR_ERROR},fg=${COLOR_FG},bold]  ${error_count} #[default]"
-fi
-
-if (( idle_count > 0 )); then
-    output+="#[bg=${COLOR_IDLE},fg=${COLOR_FG},bold]  ${idle_count} #[default]"
-fi
-
-echo "$output"
+printf '#[fg=%s,bg=default]#[fg=%s,bg=%s,bold]󰚩  %s#[fg=%s,bg=default]#[default]' \
+  "$bg" "$color_crust" "$bg" "$count" "$bg"

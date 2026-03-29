@@ -4,6 +4,8 @@
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$CURRENT_DIR/helpers.sh"
 
+start_daemon_if_needed
+
 # Read popup options
 POPUP_WIDTH=$(get_tmux_option "$OPENCODE_POPUP_WIDTH_OPTION" "$OPENCODE_POPUP_WIDTH_DEFAULT")
 POPUP_HEIGHT=$(get_tmux_option "$OPENCODE_POPUP_HEIGHT_OPTION" "$OPENCODE_POPUP_HEIGHT_DEFAULT")
@@ -17,5 +19,4 @@ tmux display-popup -E \
     -b "$POPUP_BORDER" \
     -S "fg=$POPUP_FG" \
     -s "bg=$POPUP_BG,fg=$POPUP_FG" \
-    -T " OpenCode Sessions " \
     "$CURRENT_DIR/_navigator_picker.sh"

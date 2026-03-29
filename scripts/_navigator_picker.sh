@@ -163,6 +163,20 @@ decode_field() {
     printf '%s' "$s"
 }
 
+shell_quote() {
+    local s="${1:-}"
+    s=${s//\'/\'"\'"\'}
+    printf "'%s'" "$s"
+}
+
+normalize_path() {
+    local p="${1:-}"
+    [[ -z "$p" ]] && return
+    p="${p%/}"
+    [[ -z "$p" ]] && p="/"
+    readlink -f -- "$p" 2>/dev/null || printf '%s' "$p"
+}
+
 short_dir() {
     local dir="$1"
     dir="${dir/#$HOME/~}"
@@ -413,6 +427,10 @@ fi
 # key format: "recent:host:session_id:tmux_session"
 IFS=':' read -r _recent_tag recent_host recent_sid recent_tmux_session <<< "$key"
 
+current_cmd=$(tmux display-message -p '#{pane_current_command}' 2>/dev/null || true)
+current_path=$(tmux display-message -p '#{pane_current_path}' 2>/dev/null || true)
+current_title=$(tmux display-message -p '#{pane_title}' 2>/dev/null || true)
+
 recent_dir=""
 while IFS='|' read -r host sid _title dir _updated _tmux_session; do
     if [[ "$host" == "$recent_host" && "$sid" == "$recent_sid" ]]; then
@@ -421,14 +439,31 @@ while IFS='|' read -r host sid _title dir _updated _tmux_session; do
     fi
 done <<< "$(tmux show-option -gqv "$OPENCODE_RECENT_OPTION" 2>/dev/null || true)"
 
+recent_cmd="opencode -s $(shell_quote "$recent_sid")"
+if [[ -n "$recent_dir" ]]; then
+    recent_cmd="cd -- $(shell_quote "$recent_dir") && $recent_cmd"
+fi
+
 if [[ "$recent_host" == "local" ]]; then
-    # Local recent session: always open in a new window at saved directory.
-    if [[ -n "$recent_dir" && -d "$recent_dir" ]]; then
+    current_path_norm=$(normalize_path "$current_path")
+    recent_path_norm=$(normalize_path "$recent_dir")
+
+    if [[ "$current_cmd" =~ ^(zsh|bash|fish|sh)$ ]] &&
+       [[ -n "$current_path_norm" && -n "$recent_path_norm" ]] &&
+       [[ "$current_path_norm" == "$recent_path_norm" ]]; then
+        tmux send-keys "$recent_cmd" Enter
+    elif [[ -n "$recent_dir" && -d "$recent_dir" ]]; then
         tmux new-window -c "$recent_dir" "opencode -s '$recent_sid'"
     else
         tmux new-window "opencode -s '$recent_sid'"
     fi
 else
+    if [[ "$current_cmd" == "ssh" ]] &&
+       [[ "$current_title" == "$recent_host" ]]; then
+        tmux send-keys "$recent_cmd" Enter
+        exit 0
+    fi
+
     # Remote recent session: prefer mapped tmux session from daemon metadata.
     local_tmux_session="$recent_tmux_session"
     if [[ -z "$local_tmux_session" ]]; then
@@ -442,10 +477,10 @@ else
 
     if [[ -n "$local_tmux_session" ]]; then
         # Open in the same tmux session that has SSH panes to this host
-        tmux new-window -t "$local_tmux_session" "ssh -t '$recent_host' 'opencode -s \"$recent_sid\"'"
+        tmux new-window -t "$local_tmux_session" "ssh -t $(shell_quote "$recent_host") $(shell_quote "$recent_cmd")"
         tmux switch-client -t "$local_tmux_session" 2>/dev/null || true
     else
         # Fallback: open in current session
-        tmux new-window "ssh -t '$recent_host' 'opencode -s \"$recent_sid\"'"
+        tmux new-window "ssh -t $(shell_quote "$recent_host") $(shell_quote "$recent_cmd")"
     fi
 fi

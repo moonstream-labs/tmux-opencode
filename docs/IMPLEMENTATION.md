@@ -52,8 +52,8 @@ Additional local fallback pass (`OPENCODE_POLL_LOCAL_MAP_S`, default 2s) refresh
 - watches both `@opencode-panes` and `@opencode-recent` for updates
 - selection behavior:
   - Active -> jump to pane
-  - Recent local -> new window at saved directory + `opencode -s <sid>`
-  - Recent remote -> ssh launch in mapped tmux session when available
+  - Recent local -> if current pane is a matching local shell in saved directory, send `opencode -s <sid>` in-place; otherwise new window at saved directory
+  - Recent remote -> if current pane is a matching SSH pane to the host, send in-place; otherwise ssh launch in mapped tmux session when available
 
 ## Dedupe Logic
 

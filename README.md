@@ -14,8 +14,8 @@ It provides:
 - Recent view: shows recently updated sessions from local and remote OpenCode SQLite metadata
 - One-keystroke navigation:
   - Enter on Active -> jump to the pane
-  - Enter on Recent (local) -> open `opencode -s <id>` in a new window at the saved directory
-  - Enter on Recent (remote) -> open via SSH in an appropriate tmux session
+  - Enter on Recent (local) -> reuse current pane when already in the saved directory; otherwise open a new window at that directory
+  - Enter on Recent (remote) -> reuse current matching SSH pane when possible; otherwise open via SSH in an appropriate tmux session
 - Status module: compact state/count pill for Catppuccin-style status lines
 
 ## Requirements

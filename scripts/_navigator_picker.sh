@@ -42,6 +42,7 @@ FG_WHITE=$(ansi_fg "$CLR_WHITE")
 FG_DIM=$(ansi_fg "$CLR_DIM")
 FG_TEXT=$(ansi_fg "$CLR_TEXT")
 RST="\033[0m"
+ROW_FS=$'\x1f'
 
 # --- Layout: fixed budgeted column widths ---
 get_cols() {
@@ -154,19 +155,59 @@ truncate_str() {
     fi
 }
 
-decode_field() {
-    local s="${1:-}"
-    s=${s//%0D/}
-    s=${s//%0A/ }
-    s=${s//%7C/|}
-    s=${s//%25/%}
-    printf '%s' "$s"
-}
-
 shell_quote() {
     local s="${1:-}"
     s=${s//\'/\'"\'"\'}
     printf "'%s'" "$s"
+}
+
+b64enc() {
+    printf '%s' "${1:-}" | base64 | tr -d '\n'
+}
+
+b64dec() {
+    printf '%s' "${1:-}" | base64 -d 2>/dev/null || true
+}
+
+sql_quote() {
+    local s="${1:-}"
+    s=${s//\'/\'\'}
+    printf "'%s'" "$s"
+}
+
+load_active_rows() {
+    local db_path
+    db_path=$(get_state_db_path)
+
+    [[ -f "$db_path" ]] || return 0
+    sqlite3 -separator "$ROW_FS" "$db_path" \
+        "SELECT target, cmd, state, host, IFNULL(sid,''), replace(replace(replace(IFNULL(title,''), char(9), ' '), char(10), ' '), char(13), ''), replace(replace(replace(IFNULL(dir,''), char(9), ' '), char(10), ' '), char(13), ''), IFNULL(updated, '') FROM panes" \
+        2>/dev/null || true
+}
+
+load_recent_rows() {
+    local db_path
+    db_path=$(get_state_db_path)
+
+    [[ -f "$db_path" ]] || return 0
+    sqlite3 -separator "$ROW_FS" "$db_path" \
+        "SELECT host, sid, replace(replace(replace(IFNULL(title,''), char(9), ' '), char(10), ' '), char(13), ''), replace(replace(replace(IFNULL(dir,''), char(9), ' '), char(10), ' '), char(13), ''), IFNULL(updated, ''), IFNULL(tmux_session, '') FROM recent ORDER BY updated DESC LIMIT 20" \
+        2>/dev/null || true
+}
+
+lookup_recent_dir() {
+    local host="$1"
+    local sid="$2"
+
+    local db_path
+    db_path=$(get_state_db_path)
+    [[ -f "$db_path" ]] || return 0
+
+    local qhost qsid
+    qhost=$(sql_quote "$host")
+    qsid=$(sql_quote "$sid")
+
+    sqlite3 "$db_path" "SELECT IFNULL(dir, '') FROM recent WHERE host = $qhost AND sid = $qsid LIMIT 1" 2>/dev/null || true
 }
 
 normalize_path() {
@@ -208,11 +249,11 @@ state_priority() {
     esac
 }
 
-# --- Render active sessions from @opencode-panes ---
+# --- Render active sessions from state DB ---
 render_active() {
-    local panes_data
-    panes_data=$(tmux show-option -gqv "$OPENCODE_PANES_OPTION" 2>/dev/null)
-    if [[ -z "$panes_data" ]]; then
+    local active_rows
+    active_rows=$(load_active_rows)
+    if [[ -z "$active_rows" ]]; then
         return
     fi
 
@@ -230,11 +271,14 @@ render_active() {
 
     # Collect rows with sort keys
     local -a sortable=()
-    while IFS='|' read -r target cmd state host sid title dir updated; do
+    while IFS="$ROW_FS" read -r target cmd state host sid title dir updated; do
         [[ -z "$target" ]] && continue
 
-        title=$(decode_field "$title")
-        dir=$(decode_field "$dir")
+        if [[ "$cmd" == "ssh" && -z "$sid" ]]; then
+            title="[unbound]"
+            dir="-"
+            updated=""
+        fi
 
         local pri
         pri=$(state_priority "$state")
@@ -250,8 +294,12 @@ render_active() {
 
         # Format fields
         local s_title s_dir s_host age tmux_ses
-        s_title=$(truncate_str "$title" "$C_SESSION")
-        s_dir=$(short_dir "$dir")
+        s_title=$(truncate_str "${title:-untitled}" "$C_SESSION")
+        if [[ "$dir" == "-" || -z "$dir" ]]; then
+            s_dir=$(truncate_str "${dir:--}" "$C_DIR")
+        else
+            s_dir=$(short_dir "$dir")
+        fi
         s_host=$(truncate_str "$host" "$C_HOST")
         tmux_ses=$(truncate_str "${target%%:*}" "$C_TMUX")
         age=""
@@ -269,7 +317,7 @@ render_active() {
             "$FG_DIM" "$C_AGE" "$age" "$RST")
 
         sortable+=("${pri}|${ts}|${target}"$'\t'"$(pad_line "$row")")
-    done <<< "$panes_data"
+    done <<< "$active_rows"
 
     # Sort: by priority asc, then timestamp desc
     printf '%s\n' "${sortable[@]}" | sort -t'|' -k1,1n -k2,2rn | while IFS='|' read -r _pri _ts rest; do
@@ -277,11 +325,11 @@ render_active() {
     done
 }
 
-# --- Render recent sessions from @opencode-recent ---
+# --- Render recent sessions from state DB ---
 render_recent() {
-    local recent_data
-    recent_data=$(tmux show-option -gqv "$OPENCODE_RECENT_OPTION" 2>/dev/null)
-    if [[ -z "$recent_data" ]]; then
+    local recent_rows
+    recent_rows=$(load_recent_rows)
+    if [[ -z "$recent_rows" ]]; then
         printf '%s\t%s\n' "__HEADER__" "$(pad_line "  No recent sessions found.")"
         return
     fi
@@ -299,11 +347,8 @@ render_recent() {
     printf '%s\t%s\n' "__HEADER__" "$(pad_line "$hdr")"
 
     # Data rows: host|sid|title|dir|updated|tmux_session
-    while IFS='|' read -r host sid title dir updated remote_tmux_session; do
+    while IFS="$ROW_FS" read -r host sid title dir updated remote_tmux_session; do
         [[ -z "$sid" ]] && continue
-
-        title=$(decode_field "$title")
-        dir=$(decode_field "$dir")
 
         local s_title s_dir s_host age tmux_ses
         s_title=$(truncate_str "$title" "$C_SESSION")
@@ -327,8 +372,12 @@ render_recent() {
             "$FG_DIM" "$C_TMUX" "$tmux_ses" "$RST" \
             "$FG_DIM" "$C_AGE" "$age" "$RST")
 
-        printf 'recent:%s:%s:%s\t%s\n' "$host" "$sid" "${remote_tmux_session:-}" "$(pad_line "$row")"
-    done <<< "$recent_data"
+        printf 'recent|%s|%s|%s\t%s\n' \
+            "$(b64enc "$host")" \
+            "$(b64enc "$sid")" \
+            "$(b64enc "${remote_tmux_session:-}")" \
+            "$(pad_line "$row")"
+    done <<< "$recent_rows"
 }
 
 # --- Handle render-only modes for fzf reload ---
@@ -354,18 +403,19 @@ printf 'active' > "$MODE_FILE"
 
 # --- Background watcher: auto-reload on state changes ---
 _state_watcher() {
-    local last_panes last_recent
-    last_panes=$(tmux show-option -gqv "$OPENCODE_PANES_OPTION" 2>/dev/null || true)
-    last_recent=$(tmux show-option -gqv "$OPENCODE_RECENT_OPTION" 2>/dev/null || true)
+    local last_gen
+    last_gen=$(tmux show-option -gqv "$OPENCODE_GEN_OPTION" 2>/dev/null || true)
+    [[ "$last_gen" =~ ^[0-9]+$ ]] || last_gen=0
+
     while true; do
         sleep 0.1
-        local current_panes current_recent mode
-        current_panes=$(tmux show-option -gqv "$OPENCODE_PANES_OPTION" 2>/dev/null || true)
-        current_recent=$(tmux show-option -gqv "$OPENCODE_RECENT_OPTION" 2>/dev/null || true)
-        if [[ "$current_panes" != "$last_panes" || "$current_recent" != "$last_recent" ]]; then
-            last_panes="$current_panes"
-            last_recent="$current_recent"
-            mode=$(cat "$MODE_FILE" 2>/dev/null || echo "active")
+        local current_gen mode
+        current_gen=$(tmux show-option -gqv "$OPENCODE_GEN_OPTION" 2>/dev/null || true)
+        [[ "$current_gen" =~ ^[0-9]+$ ]] || current_gen="$last_gen"
+
+        if [[ "$current_gen" != "$last_gen" ]]; then
+            last_gen="$current_gen"
+            read -r mode < "$MODE_FILE" 2>/dev/null || mode="active"
             if [[ "$mode" == "recent" ]]; then
                 reload_cmd="bash $CURRENT_DIR/_navigator_picker.sh --render-recent --cols $COLS"
             else
@@ -411,7 +461,7 @@ key=$(cut -f1 <<< "$selection")
 [[ "$key" == "__HEADER__" ]] && exit 0
 
 # --- Active session: navigate to tmux pane ---
-if [[ "$key" != recent:* ]]; then
+if [[ "$key" != recent\|* ]]; then
     # key format after sort stripping: "target\t..."
     # Extract target (may have leading sort remnants stripped by --with-nth)
     local_target="$key"
@@ -424,20 +474,18 @@ if [[ "$key" != recent:* ]]; then
 fi
 
 # --- Recent session: open session ---
-# key format: "recent:host:session_id:tmux_session"
-IFS=':' read -r _recent_tag recent_host recent_sid recent_tmux_session <<< "$key"
+# key format: "recent|base64(host)|base64(session_id)|base64(tmux_session)"
+IFS='|' read -r _recent_tag host_b64 sid_b64 tmux_b64 <<< "$key"
+recent_host=$(b64dec "$host_b64")
+recent_sid=$(b64dec "$sid_b64")
+recent_tmux_session=$(b64dec "$tmux_b64")
+[[ -n "$recent_host" && -n "$recent_sid" ]] || exit 0
 
 current_cmd=$(tmux display-message -p '#{pane_current_command}' 2>/dev/null || true)
 current_path=$(tmux display-message -p '#{pane_current_path}' 2>/dev/null || true)
 current_title=$(tmux display-message -p '#{pane_title}' 2>/dev/null || true)
 
-recent_dir=""
-while IFS='|' read -r host sid _title dir _updated _tmux_session; do
-    if [[ "$host" == "$recent_host" && "$sid" == "$recent_sid" ]]; then
-        recent_dir=$(decode_field "$dir")
-        break
-    fi
-done <<< "$(tmux show-option -gqv "$OPENCODE_RECENT_OPTION" 2>/dev/null || true)"
+recent_dir=$(lookup_recent_dir "$recent_host" "$recent_sid")
 
 recent_cmd="opencode -s $(shell_quote "$recent_sid")"
 if [[ -n "$recent_dir" ]]; then
@@ -461,6 +509,10 @@ else
     if [[ "$current_cmd" == "ssh" ]] &&
        [[ "$current_title" == "$recent_host" ]]; then
         tmux send-keys "$recent_cmd" Enter
+        current_target=$(tmux display-message -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
+        if [[ -n "$current_target" ]]; then
+            set_remote_binding "$current_target" "$recent_host" "$recent_sid" || true
+        fi
         exit 0
     fi
 
@@ -477,10 +529,16 @@ else
 
     if [[ -n "$local_tmux_session" ]]; then
         # Open in the same tmux session that has SSH panes to this host
-        tmux new-window -t "$local_tmux_session" "ssh -t $(shell_quote "$recent_host") $(shell_quote "$recent_cmd")"
+        created_target=$(tmux new-window -P -F '#{session_name}:#{window_index}.#{pane_index}' -t "$local_tmux_session" "ssh -t $(shell_quote "$recent_host") $(shell_quote "$recent_cmd")")
+        if [[ -n "$created_target" ]]; then
+            set_remote_binding "$created_target" "$recent_host" "$recent_sid" || true
+        fi
         tmux switch-client -t "$local_tmux_session" 2>/dev/null || true
     else
         # Fallback: open in current session
-        tmux new-window "ssh -t $(shell_quote "$recent_host") $(shell_quote "$recent_cmd")"
+        created_target=$(tmux new-window -P -F '#{session_name}:#{window_index}.#{pane_index}' "ssh -t $(shell_quote "$recent_host") $(shell_quote "$recent_cmd")")
+        if [[ -n "$created_target" ]]; then
+            set_remote_binding "$created_target" "$recent_host" "$recent_sid" || true
+        fi
     fi
 fi

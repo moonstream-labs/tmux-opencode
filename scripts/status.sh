@@ -2,7 +2,9 @@
 set -euo pipefail
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$CURRENT_DIR/variables.sh"
+source "$CURRENT_DIR/helpers.sh"
+
+start_daemon_if_needed
 
 # Read pill from tmux option: "state|count"
 pill=$(tmux show-option -gqv "$OPENCODE_PILL_OPTION" 2>/dev/null)

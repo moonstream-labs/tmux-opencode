@@ -10,6 +10,10 @@ source "$SCRIPTS_DIR/helpers.sh"
 # Cleanup stale option from pre-v1 host-inventory implementation.
 tmux set-option -gu "@opencode-hosts-json" 2>/dev/null || true
 
+# Cleanup stale payload options from pre-state-db transport.
+tmux set-option -gu "@opencode-panes" 2>/dev/null || true
+tmux set-option -gu "@opencode-recent" 2>/dev/null || true
+
 # --- Keybinding ---
 
 POPUP_KEY=$(get_tmux_option "$OPENCODE_POPUP_KEY_OPTION" "$OPENCODE_POPUP_KEY_DEFAULT")

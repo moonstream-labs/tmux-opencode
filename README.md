@@ -11,6 +11,7 @@ It provides:
 ## Features
 
 - Active view: shows currently attached OpenCode panes, with live state (`running`, `permission`, `idle`)
+- Remote panes without an exact session binding are shown as `[unbound]` (no implicit newest-session guess by default)
 - Recent view: shows recently updated sessions from local and remote OpenCode SQLite metadata
 - One-keystroke navigation:
   - Enter on Active -> jump to the pane
@@ -82,6 +83,11 @@ set -g @opencode-popup-fg '#dadada'
 
 # Optional: plugin-managed status-right append (off by default)
 set -g @opencode-auto-status-right 'off'
+
+# Optional: remote polling and binding behavior
+set -g @opencode-remote-polling 'on'
+set -g @opencode-remote-binding-mode 'unbound' # or 'latest' (legacy heuristic)
+set -g @opencode-ssh-strict-host-key-checking 'accept-new'
 ```
 
 ### Status Module (manual composition, recommended)
@@ -120,12 +126,21 @@ set -g @opencode-auto-status-right 'on'
 | `@opencode-popup-bg` | `#080909` | Popup background |
 | `@opencode-popup-fg` | `#dadada` | Popup foreground/border color |
 | `@opencode-auto-status-right` | `off` | Auto-append status module to `status-right` |
+| `@opencode-remote-polling` | `on` | Enable remote SSH metadata polling |
+| `@opencode-remote-binding-mode` | `unbound` | `unbound` (default) or `latest` legacy remote fallback |
+| `@opencode-ssh-connect-timeout` | `3` | SSH connect timeout used for remote polling |
+| `@opencode-ssh-strict-host-key-checking` | `accept-new` | Host-key policy used for remote polling SSH |
 
 Internal runtime options (managed by the plugin):
 
 - `@opencode-pill`
-- `@opencode-panes`
-- `@opencode-recent`
+- `@opencode-daemon-ts`
+- `@opencode-gen`
+
+Environment override paths:
+
+- `OPENCODE_STATE_DIR` (default: `/tmp/tmux-opencode-<uid>`)
+- `OPENCODE_STATE_DB_PATH` (default: `$OPENCODE_STATE_DIR/state.db`)
 
 ## How It Works (High Level)
 
@@ -137,9 +152,10 @@ Internal runtime options (managed by the plugin):
   - discovers local/ssh OpenCode panes
   - maps pane -> OpenCode session IDs
   - reads local/remote OpenCode SQLite metadata
-  - writes tmux runtime options (`pill`, `panes`, `recent`)
+  - writes normalized runtime snapshots to `$OPENCODE_STATE_DIR/state.db`
+  - updates tmux runtime options (`pill`, `gen`, heartbeat)
 - `scripts/_navigator_picker.sh`
-  - renders Active/Recent tables from tmux options
+  - renders Active/Recent tables from state DB
   - provides mode toggle, selection, and launch actions
 - `scripts/status.sh`
   - renders the status pill from `@opencode-pill`
@@ -150,6 +166,7 @@ For implementation details, see `docs/IMPLEMENTATION.md`.
 
 - Local sessions started as plain `opencode` (without `-s`) use newest-in-directory fallback mapping.
 - Remote session-to-pane association can be ambiguous if multiple SSH panes target the same host alias.
+- Remote panes are intentionally left unbound unless an exact mapping is known (or legacy `latest` mode is enabled).
 - Linux-only assumptions are currently baked in.
 
 ## Troubleshooting
@@ -161,6 +178,9 @@ For implementation details, see `docs/IMPLEMENTATION.md`.
   - verify local DB exists at `~/.local/share/opencode/opencode.db`
 - Status pill missing:
   - ensure status module is included in `status-right` (or enable auto-append)
+- Remote panes show `[unbound]`:
+  - this is expected until an exact mapping is learned (open/reuse from Recent once to bind)
+  - optionally enable legacy heuristic mapping: `set -g @opencode-remote-binding-mode 'latest'`
 - High-latency/freeze symptoms:
   - check host I/O pressure (`cat /proc/pressure/io`) and `vmstat`
   - this is often host/disk contention rather than plugin logic

@@ -17,21 +17,20 @@ get_opt() {
 }
 
 color_yellow=$(get_opt "@thm_yellow" "#f9e2af")
-color_blue=$(get_opt "@thm_blue" "#89b4fa")
 color_green=$(get_opt "@thm_green" "#a6e3a1")
 color_crust=$(get_opt "@thm_crust" "#1e1e2e")
-color_text=$(get_opt "@thm_fg" "#dadada")
+color_white="#dadada"
 
 # No sessions: transparent bg, white fg
 if [[ "$count" == "0" ]]; then
-  printf '#[fg=%s,bg=default] #[fg=%s,bg=default]󰚩  %s#[default] ' "$color_text" "$color_text" "$count"
+  printf '#[fg=%s,bg=default] #[fg=%s,bg=default]󰚩  %s#[default] ' "$color_white" "$color_white" "$count"
   exit 0
 fi
 
 case "$state" in
 permission) bg="$color_yellow" ;;
-running) bg="$color_blue" ;;
-*) bg="$color_green" ;;
+running) bg="$color_green" ;;
+*) bg="$color_white" ;;
 esac
 
 printf '#[fg=%s,bg=default]#[fg=%s,bg=%s,bold]󰚩  %s#[fg=%s,bg=default]#[default]' \

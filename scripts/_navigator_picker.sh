@@ -29,16 +29,16 @@ get_opt() {
 }
 
 CLR_YELLOW=$(get_opt "@thm_yellow" "#f9e2af")
-CLR_BLUE=$(get_opt "@thm_blue" "#89b4fa")
 CLR_GREEN=$(get_opt "@thm_green" "#a6e3a1")
+CLR_WHITE="#dadada"
 CLR_DIM=$(get_opt "@thm_overlay_0" "#6c7086")
 CLR_TEXT=$(get_opt "@thm_fg" "#cdd6f4")
 
 ansi_fg() { printf '\033[38;2;%d;%d;%dm' "0x${1:1:2}" "0x${1:3:2}" "0x${1:5:2}"; }
 
 FG_YELLOW=$(ansi_fg "$CLR_YELLOW")
-FG_BLUE=$(ansi_fg "$CLR_BLUE")
 FG_GREEN=$(ansi_fg "$CLR_GREEN")
+FG_WHITE=$(ansi_fg "$CLR_WHITE")
 FG_DIM=$(ansi_fg "$CLR_DIM")
 FG_TEXT=$(ansi_fg "$CLR_TEXT")
 RST="\033[0m"
@@ -244,8 +244,8 @@ render_active() {
         local circle_color
         case "$state" in
             permission) circle_color="$FG_YELLOW" ;;
-            running)    circle_color="$FG_BLUE" ;;
-            *)          circle_color="$FG_GREEN" ;;
+            running)    circle_color="$FG_GREEN" ;;
+            *)          circle_color="$FG_WHITE" ;;
         esac
 
         # Format fields

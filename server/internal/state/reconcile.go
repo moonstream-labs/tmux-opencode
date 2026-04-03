@@ -66,6 +66,23 @@ func (r *Reconciler) Reconcile() {
 		}
 	}
 
+	// Cache any named sessions for future lookups.
+	for i := range allPanes {
+		p := &allPanes[i]
+		if p.Name != "" && p.SessionID != "" {
+			r.db.CacheName(p.Tool, p.SessionID, p.Name, p.Dir)
+		}
+		// Fill in names from cache if missing.
+		if p.Name == "" && p.SessionID != "" {
+			if name, dir := r.db.LookupName(p.Tool, p.SessionID); name != "" {
+				p.Name = name
+				if p.Dir == "" {
+					p.Dir = dir
+				}
+			}
+		}
+	}
+
 	// Always write DB snapshot if panes changed; only bump gen/pills if pill changed.
 	if err := r.db.WriteSnapshot(allPanes, allRecent); err != nil {
 		log.Printf("reconcile: db write error: %v", err)
@@ -103,10 +120,10 @@ func computePill(panes []PaneRow, tool Tool) string {
 		return "idle|0"
 	}
 	if permission > 0 {
-		return fmt.Sprintf("permission|%d", total)
+		return fmt.Sprintf("permission|%d", permission)
 	}
 	if running > 0 {
-		return fmt.Sprintf("running|%d", total)
+		return fmt.Sprintf("running|%d", running)
 	}
 	return fmt.Sprintf("active|%d", total)
 }

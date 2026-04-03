@@ -17,12 +17,13 @@ type Session struct {
 }
 
 type Instance struct {
-	Port       int
-	PaneTarget string
-	Name       string // initial name from wrapper
-	Sessions   map[string]*Session
-	cancel     context.CancelFunc
-	UpdatedAt  time.Time
+	Port             int
+	PaneTarget       string
+	Name             string // initial name from wrapper
+	ActiveSessionID  string // hint from -s flag on resume
+	Sessions         map[string]*Session
+	cancel           context.CancelFunc
+	UpdatedAt        time.Time
 }
 
 type Store struct {
@@ -94,6 +95,8 @@ func (s *Store) SetSessionState(port int, sessionID string, st state.SessionStat
 	sess.State = st
 	sess.UpdatedAt = time.Now()
 	inst.UpdatedAt = time.Now()
+	// Any state change on a session makes it the active one.
+	inst.ActiveSessionID = sessionID
 	return true
 }
 
@@ -169,10 +172,16 @@ func (s *Store) ActivePanes() []state.PaneRow {
 			Host:    "local",
 		}
 
+		// Prefer the hinted active session (from -s flag), fall back to most recent.
 		var best *Session
-		for _, sess := range inst.Sessions {
-			if best == nil || sess.UpdatedAt.After(best.UpdatedAt) {
-				best = sess
+		if inst.ActiveSessionID != "" {
+			best = inst.Sessions[inst.ActiveSessionID]
+		}
+		if best == nil {
+			for _, sess := range inst.Sessions {
+				if best == nil || sess.UpdatedAt.After(best.UpdatedAt) {
+					best = sess
+				}
 			}
 		}
 		if best != nil {

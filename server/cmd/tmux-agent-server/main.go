@@ -129,7 +129,7 @@ func main() {
 	}()
 
 	// Pane scanner: discover unwrapped sessions, prune dead panes.
-	go tmux.RunScanner(ctx, 10*time.Second, tmux.ScannerCallbacks{
+	go tmux.RunScanner(ctx, 5*time.Second, tmux.ScannerCallbacks{
 		IsClaudeTracked: func(target string) bool {
 			for _, s := range claudeStore.All() {
 				if s.PaneTarget == target {

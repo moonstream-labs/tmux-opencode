@@ -52,8 +52,35 @@ func initSchema(db *sql.DB) error {
 			tmux_session TEXT,
 			PRIMARY KEY(tool, session_id, host)
 		);
+
+		CREATE TABLE IF NOT EXISTS session_names (
+			tool       TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			name       TEXT NOT NULL,
+			dir        TEXT,
+			updated    INTEGER,
+			PRIMARY KEY(tool, session_id)
+		);
 	`)
 	return err
+}
+
+func (db *DB) CacheName(tool Tool, sessionID, name, dir string) error {
+	if name == "" {
+		return nil
+	}
+	_, err := db.Exec(
+		`INSERT OR REPLACE INTO session_names (tool, session_id, name, dir, updated)
+		 VALUES (?, ?, ?, ?, strftime('%s','now') * 1000)`,
+		tool, sessionID, name, dir)
+	return err
+}
+
+func (db *DB) LookupName(tool Tool, sessionID string) (name string, dir string) {
+	db.QueryRow(
+		`SELECT name, IFNULL(dir,'') FROM session_names WHERE tool = ? AND session_id = ?`,
+		tool, sessionID).Scan(&name, &dir)
+	return
 }
 
 func (db *DB) WritePanesSnapshot(panes []PaneRow) error {

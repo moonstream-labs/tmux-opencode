@@ -15,6 +15,7 @@ type registerPayload struct {
 	Port       int    `json:"port"`
 	PaneTarget string `json:"pane_target"`
 	Name       string `json:"name"`
+	SessionID  string `json:"session_id,omitempty"`
 }
 
 type Handler struct {
@@ -59,7 +60,10 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	inst := h.store.Register(payload.Port, payload.PaneTarget, payload.Name, cancel)
-	log.Printf("opencode: registered port=%d pane=%s name=%q", payload.Port, payload.PaneTarget, payload.Name)
+	if payload.SessionID != "" {
+		inst.ActiveSessionID = payload.SessionID
+	}
+	log.Printf("opencode: registered port=%d pane=%s name=%q sid=%s", payload.Port, payload.PaneTarget, payload.Name, payload.SessionID)
 
 	// Start SSE client goroutine.
 	client := NewClient(payload.Port, h.store, h.reconciler)

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# status_claude.sh -- Claude Code status pill for tmux status-right
-# Glyph: 󰚩 with rounded pill separators
-
 pill=$(tmux show-option -gqv "@agents-claude-pill" 2>/dev/null)
 state="${pill%%|*}"
 count="${pill#*|}"
@@ -21,15 +18,15 @@ color_crust=$(get_opt "@thm_crust" "#1e1e2e")
 color_white="#dadada"
 
 if [[ "$count" == "0" ]]; then
-  printf '#[fg=%s,bg=default]#[fg=%s,bg=%s]󰚩 %s#[fg=%s,bg=default]#[default] ' "$color_white" "$color_white" "$color_white" "$count" "$color_white"
+  printf '#[fg=%s,bg=default] 󰚩  %s #[default] ' "$color_white" "$count"
   exit 0
 fi
 
 case "$state" in
 permission) bg="$color_yellow" ;;
-running) bg="$color_green" ;;
-*) bg="$color_white" ;;
+running)    bg="$color_green" ;;
+*)          bg="$color_white" ;;
 esac
 
-printf '#[fg=%s,bg=default]#[fg=%s,bg=%s,bold]󰚩 %s#[fg=%s,bg=default]#[default] ' \
+printf '#[fg=%s,bg=default]#[fg=%s,bg=%s,bold]󰚩  %s#[fg=%s,bg=default]#[default] ' \
   "$bg" "$color_crust" "$bg" "$count" "$bg"

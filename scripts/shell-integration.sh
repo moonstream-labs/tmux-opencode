@@ -72,11 +72,22 @@ opencode() {
   local name=""
   local resuming=false
 
-  # Detect resume/continue flags — skip name prompt.
+  local resume_sid=""
+
+  # Detect resume/continue flags — skip name prompt, extract session ID.
+  # Use a simple prev-arg tracker to avoid bash/zsh array indexing differences.
+  local prev=""
   for arg in "$@"; do
     case "$arg" in
-      -s|--session|-c|--continue) resuming=true; break ;;
+      -s|--session) resuming=true ;;
+      -c|--continue) resuming=true ;;
+      *)
+        if [[ "$prev" == "-s" || "$prev" == "--session" ]]; then
+          resume_sid="$arg"
+        fi
+        ;;
     esac
+    prev="$arg"
   done
 
   if [[ "$resuming" == false ]]; then
@@ -112,7 +123,7 @@ opencode() {
       sleep 2
       curl -sf -X POST "$TMUX_AGENTS_SERVER/opencode/register" \
         -H 'Content-Type: application/json' \
-        -d "{\"port\":$port,\"name\":\"$name\",\"pane_target\":\"$target\"}" \
+        -d "{\"port\":$port,\"name\":\"$name\",\"pane_target\":\"$target\",\"session_id\":\"$resume_sid\"}" \
         >/dev/null 2>&1
 
       # Rename the active session via OpenCode API if a name was provided.

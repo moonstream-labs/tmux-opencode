@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # status_opencode.sh -- OpenCode status pill for tmux status-right
-# Reads @agents-opencode-pill ("state|count") and renders a Catppuccin-compatible segment.
-# Glyph:   (positioned left of Claude pill in status line)
+# Glyph:  with rounded pill separators
 
 pill=$(tmux show-option -gqv "@agents-opencode-pill" 2>/dev/null)
 state="${pill%%|*}"
@@ -22,7 +21,7 @@ color_crust=$(get_opt "@thm_crust" "#1e1e2e")
 color_white="#dadada"
 
 if [[ "$count" == "0" ]]; then
-  printf '#[fg=%s,bg=default] #[fg=%s,bg=default]   %s#[default] ' "$color_white" "$color_white" "$count"
+  printf '#[fg=%s,bg=default]#[fg=%s,bg=%s] %s#[fg=%s,bg=default]#[default] ' "$color_white" "$color_white" "$color_white" "$count" "$color_white"
   exit 0
 fi
 
@@ -32,5 +31,5 @@ running) bg="$color_green" ;;
 *) bg="$color_white" ;;
 esac
 
-printf '#[fg=%s,bg=default]#[fg=%s,bg=%s,bold]   %s#[fg=%s,bg=default]#[default]' \
+printf '#[fg=%s,bg=default]#[fg=%s,bg=%s,bold] %s#[fg=%s,bg=default]#[default] ' \
   "$bg" "$color_crust" "$bg" "$count" "$bg"

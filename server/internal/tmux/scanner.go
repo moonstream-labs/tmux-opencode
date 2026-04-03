@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -195,8 +194,11 @@ type ScannerCallbacks struct {
 	// tracked as an OpenCode session.
 	IsOpenCodeTracked func(target string) bool
 
-	// OnPaneGone is called when a previously tracked pane no longer exists.
+	// OnPaneGone is called when a previously tracked pane no longer runs an agent.
 	OnPaneGone func(target string)
+
+	// GetTrackedTargets returns all pane targets currently tracked by any store.
+	GetTrackedTargets func() []string
 }
 
 // RunScanner periodically scans tmux panes to discover untracked sessions
@@ -221,13 +223,13 @@ func scanOnce(cb ScannerCallbacks) {
 		return
 	}
 
-	activePanes := make(map[string]bool)
+	// Build set of panes running claude or opencode.
+	agentPanes := make(map[string]bool)
 
 	for _, p := range panes {
-		activePanes[p.Target] = true
-
 		switch p.Command {
 		case "claude":
+			agentPanes[p.Target] = true
 			if cb.IsClaudeTracked != nil && cb.IsClaudeTracked(p.Target) {
 				continue
 			}
@@ -236,6 +238,7 @@ func scanOnce(cb ScannerCallbacks) {
 			}
 
 		case "opencode":
+			agentPanes[p.Target] = true
 			if cb.IsOpenCodeTracked != nil && cb.IsOpenCodeTracked(p.Target) {
 				continue
 			}
@@ -246,12 +249,14 @@ func scanOnce(cb ScannerCallbacks) {
 		}
 	}
 
-	// Pruning of gone panes is handled by the caller checking PaneExists
-	// on its tracked targets, as the scanner doesn't know the full set.
-	// The main server should periodically call PaneExists for its tracked
-	// targets and invoke OnPaneGone for any that vanish.
-	_ = cb.OnPaneGone // available for caller to implement prune loop
-	_ = activePanes
-
-	log.Printf("scanner: %d panes scanned", len(panes))
+	// Prune tracked sessions whose pane no longer runs an agent process.
+	if cb.OnPaneGone != nil {
+		if cb.GetTrackedTargets != nil {
+			for _, target := range cb.GetTrackedTargets() {
+				if !agentPanes[target] {
+					cb.OnPaneGone(target)
+				}
+			}
+		}
+	}
 }

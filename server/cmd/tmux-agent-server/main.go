@@ -191,6 +191,40 @@ func main() {
 			log.Printf("scanner: discovered opencode port=%d pane=%s", port, target)
 			return true
 		},
+		GetTrackedTargets: func() []string {
+			var targets []string
+			for _, s := range claudeStore.All() {
+				if s.PaneTarget != "" {
+					targets = append(targets, s.PaneTarget)
+				}
+			}
+			for _, p := range opencodeStore.Ports() {
+				if inst, ok := opencodeStore.Get(p); ok {
+					targets = append(targets, inst.PaneTarget)
+				}
+			}
+			return targets
+		},
+		OnPaneGone: func(target string) {
+			// Check Claude store.
+			for _, s := range claudeStore.All() {
+				if s.PaneTarget == target {
+					claudeStore.Remove(s.ID)
+					log.Printf("scanner: pruned claude session=%s pane=%s", s.ID, target)
+					reconciler.Reconcile()
+					return
+				}
+			}
+			// Check OpenCode store.
+			for _, p := range opencodeStore.Ports() {
+				if inst, ok := opencodeStore.Get(p); ok && inst.PaneTarget == target {
+					opencodeStore.Remove(p)
+					log.Printf("scanner: pruned opencode port=%d pane=%s", p, target)
+					reconciler.Reconcile()
+					return
+				}
+			}
+		},
 	})
 
 	go func() {

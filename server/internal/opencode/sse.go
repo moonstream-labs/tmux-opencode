@@ -30,6 +30,42 @@ type sessionProps struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Directory string `json:"directory"`
+	// session.updated nests session data under "info"
+	Info struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Directory string `json:"directory"`
+		Slug      string `json:"slug"`
+	} `json:"info"`
+}
+
+// resolvedTitle returns the title from the top level or from info.
+func (p *sessionProps) resolvedTitle() string {
+	if p.Title != "" {
+		return p.Title
+	}
+	if p.Info.Title != "" {
+		return p.Info.Title
+	}
+	return p.Info.Slug
+}
+
+func (p *sessionProps) resolvedDir() string {
+	if p.Directory != "" {
+		return p.Directory
+	}
+	return p.Info.Directory
+}
+
+func (p *sessionProps) resolvedID() string {
+	return coalesce(p.SessionID, p.ID, p.Info.ID)
+}
+
+type sessionStatusProps struct {
+	SessionID string `json:"sessionID"`
+	Status    struct {
+		Type string `json:"type"`
+	} `json:"status"`
 }
 
 type permissionProps struct {
@@ -74,6 +110,9 @@ func (c *Client) Run(ctx context.Context) {
 	backoff := time.Second
 	maxBackoff := 30 * time.Second
 
+	consecutiveFailures := 0
+	maxConsecutiveFailures := 10 // give up after ~5 minutes of failures
+
 	for {
 		err := c.connect(ctx)
 		if ctx.Err() != nil {
@@ -81,8 +120,16 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		if err != nil {
-			log.Printf("opencode[%d]: SSE connection error: %v (retry in %v)", c.port, err, backoff)
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				log.Printf("opencode[%d]: giving up after %d consecutive failures", c.port, consecutiveFailures)
+				return
+			}
+			log.Printf("opencode[%d]: SSE error: %v (retry %d/%d in %v)", c.port, err, consecutiveFailures, maxConsecutiveFailures, backoff)
 		} else {
+			// Connection was established then dropped — reset failure count.
+			consecutiveFailures = 0
+			backoff = time.Second
 			log.Printf("opencode[%d]: SSE connection closed (retry in %v)", c.port, backoff)
 		}
 
@@ -166,35 +213,53 @@ func (c *Client) handleEvent(ctx context.Context, evt *sseEvent) {
 
 	changed := false
 
+	// Log notable events for debugging (skip heartbeats and high-frequency deltas).
+	switch eventType {
+	case "server.connected", "server.heartbeat", "message.part.delta":
+		// skip logging
+	default:
+		log.Printf("opencode[%d]: event=%s", c.port, eventType)
+	}
+
 	switch eventType {
 	case "session.idle":
 		var props sessionProps
 		json.Unmarshal(payload.Properties, &props)
-		sid := coalesce(props.SessionID, props.ID)
+		sid := props.resolvedID()
 		if sid != "" {
 			changed = c.store.SetSessionState(c.port, sid, state.StateIdle)
+		}
+
+	case "session.status":
+		var props sessionStatusProps
+		json.Unmarshal(payload.Properties, &props)
+		if props.SessionID != "" {
+			st := mapOpenCodeStatus(props.Status.Type)
+			changed = c.store.SetSessionState(c.port, props.SessionID, st)
 		}
 
 	case "session.created":
 		var props sessionProps
 		json.Unmarshal(payload.Properties, &props)
-		sid := coalesce(props.SessionID, props.ID)
+		sid := props.resolvedID()
 		if sid != "" {
-			changed = c.store.UpsertSession(c.port, sid, props.Title, props.Directory)
+			changed = c.store.UpsertSession(c.port, sid, props.resolvedTitle(), props.resolvedDir())
+			log.Printf("opencode[%d]: session.created sid=%s title=%q dir=%q", c.port, sid, props.resolvedTitle(), props.resolvedDir())
 		}
 
 	case "session.updated":
 		var props sessionProps
 		json.Unmarshal(payload.Properties, &props)
-		sid := coalesce(props.SessionID, props.ID)
+		sid := props.resolvedID()
 		if sid != "" {
-			changed = c.store.UpsertSession(c.port, sid, props.Title, props.Directory)
+			changed = c.store.UpsertSession(c.port, sid, props.resolvedTitle(), props.resolvedDir())
+			log.Printf("opencode[%d]: session.updated sid=%s title=%q dir=%q", c.port, sid, props.resolvedTitle(), props.resolvedDir())
 		}
 
 	case "session.deleted":
 		var props sessionProps
 		json.Unmarshal(payload.Properties, &props)
-		sid := coalesce(props.SessionID, props.ID)
+		sid := props.resolvedID()
 		if sid != "" {
 			c.store.RemoveSession(c.port, sid)
 			changed = true
@@ -203,7 +268,7 @@ func (c *Client) handleEvent(ctx context.Context, evt *sseEvent) {
 	case "session.error":
 		var props sessionProps
 		json.Unmarshal(payload.Properties, &props)
-		sid := coalesce(props.SessionID, props.ID)
+		sid := props.resolvedID()
 		if sid != "" {
 			changed = c.store.SetSessionState(c.port, sid, state.StateIdle)
 		}
@@ -328,3 +393,4 @@ func coalesce(values ...string) string {
 	}
 	return ""
 }
+

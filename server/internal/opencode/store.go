@@ -84,6 +84,29 @@ func (s *Store) Remove(port int) *Instance {
 func (s *Store) SetSessionState(port int, sessionID string, st state.SessionState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.setSessionStateLocked(port, sessionID, st)
+}
+
+// SetSessionStateIf sets the state only if the current state is NOT the excluded state.
+// Used to prevent message.part.updated from overriding a recent session.idle.
+func (s *Store) SetSessionStateIf(port int, sessionID string, st state.SessionState, excludeCurrent state.SessionState) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inst, ok := s.instances[port]
+	if !ok {
+		return false
+	}
+	sess, ok := inst.Sessions[sessionID]
+	if !ok {
+		return false
+	}
+	if sess.State == excludeCurrent {
+		return false
+	}
+	return s.setSessionStateLocked(port, sessionID, st)
+}
+
+func (s *Store) setSessionStateLocked(port int, sessionID string, st state.SessionState) bool {
 	inst, ok := s.instances[port]
 	if !ok {
 		return false
@@ -95,7 +118,6 @@ func (s *Store) SetSessionState(port int, sessionID string, st state.SessionStat
 	sess.State = st
 	sess.UpdatedAt = time.Now()
 	inst.UpdatedAt = time.Now()
-	// Any state change on a session makes it the active one.
 	inst.ActiveSessionID = sessionID
 	return true
 }

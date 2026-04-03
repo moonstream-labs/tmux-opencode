@@ -290,10 +290,12 @@ func (c *Client) handleEvent(ctx context.Context, evt *sseEvent) {
 		}
 
 	case "message.part.updated":
+		// Only escalate to running — don't override idle set by session.idle/session.status.
+		// The SSE stream can deliver part updates slightly after the idle signal.
 		var props messagePartProps
 		json.Unmarshal(payload.Properties, &props)
 		if props.SessionID != "" {
-			changed = c.store.SetSessionState(c.port, props.SessionID, state.StateRunning)
+			changed = c.store.SetSessionStateIf(c.port, props.SessionID, state.StateRunning, state.StateIdle)
 		}
 
 	case "server.connected":

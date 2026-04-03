@@ -1,412 +1,171 @@
 # Implementation Notes
 
-This document describes the current `tmux-opencode` implementation in detail: process model, data model, control flow, and key design tradeoffs.
-
 ## 1. Runtime Topology
 
-`tmux-opencode` is implemented as a small Bash runtime split into four executable surfaces:
+`tmux-agents` has four components:
+
+1. **`agents.tmux`** — TPM entrypoint. Installs keybinding, ensures server is running, optionally appends status modules.
+
+2. **Go status server** (`server/`) — Background HTTP server on `127.0.0.1:7077`. Receives push events from both tools, maintains state DB, publishes tmux signaling options. Runs as systemd user service.
+
+3. **`scripts/_navigator_picker.sh`** — Renders Active/Recent views from state DB. Hosts interactive fzf picker. Routes selection actions per tool.
 
-1. `opencode.tmux`
-   - TPM entrypoint
-   - installs key binding
-   - starts/repairs daemon
-   - optionally appends status module into `status-right`
+4. **Status pill scripts** — `status_claude.sh` (glyph: 󰚩) and `status_opencode.sh` (glyph: ). Read per-tool pill options.
 
-2. `scripts/daemon.sh`
-   - single-instance polling daemon (Linux-oriented)
-   - discovers active OpenCode panes (local + SSH)
-   - resolves pane-to-session mappings
-   - queries local/remote OpenCode metadata
-   - writes normalized snapshots into state DB
-   - publishes lightweight tmux signaling options
+## 2. Go Server Architecture
 
-3. `scripts/_navigator_picker.sh`
-   - renders Active/Recent views from state DB
-   - hosts interactive `fzf` picker mode
-   - routes selection actions (jump / local launch / remote launch)
-   - writes exact remote pane bindings when user launches/reuses remote sessions
+### Goroutine Layout
 
-4. `scripts/status.sh`
-   - tiny status renderer
-   - reads daemon pill state and prints a Catppuccin-compatible segment
-   - also calls daemon health gate (`start_daemon_if_needed`) to self-heal stale daemons
+```
+main
+ ├─ net/http.ListenAndServe
+ │   POST /claude/hook         (Claude Code hook receiver)
+ │   POST /claude/register     (pre-registration from cc() wrapper)
+ │   POST /opencode/register   (instance registration from oc() wrapper)
+ │   GET  /opencode/port       (port assignment)
+ │   GET  /healthz
+ │
+ ├─ claude.WatchTitles         (fsnotify on ~/.claude/projects/*/*.jsonl)
+ ├─ claude.ScanActiveSessions  (startup: scan ~/.claude/sessions/*.json)
+ ├─ tmux.RunScanner            (periodic 10s: pane discovery + target assignment)
+ ├─ [per OC instance] sse.Client (GET /event on OpenCode server)
+ ├─ heartbeat ticker           (1s: write @agents-server-ts)
+ └─ pending prune ticker       (30s: remove stale pre-registrations)
+```
 
+### State Flow
 
-## 2. Storage and Signaling Model
+All state mutations from any goroutine call `state.Reconciler.Reconcile()`, which holds a `sync.Mutex` and:
 
-The implementation intentionally separates **state transport** from **UI signaling**.
+1. Collects `ActivePanes()` from all registered providers (Claude store, OpenCode store)
+2. Collects `RecentSessions()` from all providers
+3. Computes per-tool pill values: `permission|N` > `running|N` > `active|N` > `idle|0`
+4. Compares pills with previous — if changed: writes DB snapshot, bumps `@agents-gen`, sets pill options, refreshes tmux clients
 
-### 2.1 Canonical Runtime State (SQLite)
+### State DB Schema
 
-Primary runtime state lives in a plugin-owned SQLite DB:
+SQLite at `/tmp/tmux-agents-<uid>/state.db`, WAL mode:
 
-- path: `$OPENCODE_STATE_DB_PATH`
-- default: `$OPENCODE_STATE_DIR/state.db`
-- default state dir: `/tmp/tmux-opencode-<uid>`
+```sql
+CREATE TABLE panes (
+  target     TEXT PRIMARY KEY,
+  tool       TEXT NOT NULL,      -- 'claude' | 'opencode'
+  state      TEXT NOT NULL,      -- 'idle' | 'running' | 'permission' | 'unknown'
+  session_id TEXT,
+  name       TEXT,
+  dir        TEXT,
+  updated    INTEGER,
+  host       TEXT NOT NULL DEFAULT 'local'
+);
 
-Schema (initialized by daemon):
+CREATE TABLE recent (
+  tool         TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  name         TEXT,
+  dir          TEXT,
+  updated      INTEGER,
+  host         TEXT NOT NULL DEFAULT 'local',
+  tmux_session TEXT,
+  PRIMARY KEY(tool, session_id, host)
+);
+```
 
-- `panes`
-  - `target TEXT PRIMARY KEY`
-  - `cmd TEXT NOT NULL`
-  - `state TEXT NOT NULL`
-  - `host TEXT NOT NULL`
-  - `sid TEXT`
-  - `title TEXT`
-  - `dir TEXT`
-  - `updated INTEGER`
+### tmux Signaling Options
 
-- `recent`
-  - `host TEXT NOT NULL`
-  - `sid TEXT NOT NULL`
-  - `title TEXT`
-  - `dir TEXT`
-  - `updated INTEGER`
-  - `tmux_session TEXT`
-  - `PRIMARY KEY(host, sid)`
+- `@agents-claude-pill` — format: `state|count`
+- `@agents-opencode-pill` — format: `state|count`
+- `@agents-gen` — monotonic counter, incremented on any state change
+- `@agents-server-ts` — unix epoch heartbeat
 
-Write pattern:
+## 3. Claude Code Integration
 
-- snapshot writes are transactional (`BEGIN IMMEDIATE` ... `COMMIT`)
-- daemon rebuilds `panes` and `recent` snapshots and replaces table contents atomically
-- fast tier may update only `panes` snapshot between metadata cycles
+### State via HTTP Hooks
 
+Claude Code hooks (`type: "http"`, `async: true`) POST JSON to `/claude/hook`. Configured in `~/.claude/settings.json`.
 
-### 2.2 tmux Signaling Options
+| Hook Event | State Transition |
+|---|---|
+| `SessionStart` | Register → idle |
+| `UserPromptSubmit` | → running |
+| `PreToolUse` | → running (reinforces) |
+| `PermissionRequest` | → permission |
+| `Notification` (permission_prompt) | → permission |
+| `Stop` | → idle |
+| `SessionEnd` | Remove → recent |
 
-tmux options now carry signaling/status only (not full dataset transport):
+### Session Identity
 
-- `@opencode-pill`
-  - format: `state|count`
-  - `state ∈ {permission, running, active, idle}`
+- Hook payloads include `session_id` (UUID) and `cwd`
+- Active sessions discoverable from `~/.claude/sessions/<pid>.json`
+- Session names stored as `custom-title` entries in `~/.claude/projects/<project>/<sessionId>.jsonl`
 
-- `@opencode-gen`
-  - monotonic generation counter
-  - incremented whenever pane/recent snapshots materially change
-  - picker watcher reloads on generation changes
+### Pane Correlation
 
-- `@opencode-daemon-ts`
-  - unix epoch seconds heartbeat
-  - used by launch paths to detect/restart stale daemon process
+1. `cc()` wrapper pre-registers `{name, pane_target, cwd}` via `POST /claude/register`
+2. When `SessionStart` hook fires, server matches by pane target verification or CWD
+3. Pane scanner fallback: walks process tree from pane PID, finds `~/.claude/sessions/<pid>.json`
 
+### Title Propagation
 
-### 2.3 Auxiliary State Files
+fsnotify watches `~/.claude/projects/*/` for JSONL writes. On write, tails last lines for `custom-title` entries and updates session name.
 
-Under `$OPENCODE_STATE_DIR`:
+## 4. OpenCode Integration
 
-- `daemon.pid`
-  - active daemon process id
+### State via SSE
 
-- `daemon.lock`
-  - `flock` lock for single-instance enforcement
+Each OpenCode TUI instance runs an embedded HTTP server. The `oc()` wrapper passes `--port <N>` and registers with the Go server.
 
-- `remote-bindings.tsv`
-  - exact remote pane bindings persisted by picker
-  - format: `<target>\t<host>\t<sid>`
-  - daemon consumes this to map SSH panes with high confidence
+Per-instance SSE goroutine connects to `GET /event`:
 
+| SSE Event | State Transition |
+|---|---|
+| `session.idle` | → idle |
+| `message.part.updated` | → running |
+| `permission.asked` | → permission |
+| `permission.replied` | → re-check /session/status |
+| `session.created` | Register session |
+| `session.updated` | Re-fetch metadata (catches renames) |
+| `session.deleted` | Remove session |
+| `server.connected` | Fetch all sessions |
 
-## 3. Process Lifecycle and Health
+Connection loss triggers exponential backoff retry (1s → 30s max).
 
-## 3.1 Startup
+### Instance Lifecycle
 
-On plugin load (`opencode.tmux`):
+- One instance = one tmux pane = one SSE goroutine
+- Multiple sessions per instance, but `ActivePanes()` returns only the most recently active session per instance
+- Instance removed when SSE drops and process is dead, or when pane vanishes from tmux
 
-1. sources shared helpers
-2. removes stale pre-v1 and pre-state-db options
-3. installs popup key binding
-4. runs `start_daemon_if_needed`
+### Session Metadata
 
-`start_daemon_if_needed` behavior:
+- `GET /session` — list all sessions (title, directory)
+- `GET /session/status` — per-session status (idle, busy, retry)
+- `PATCH /session/:id` — rename (propagated via `session.updated` SSE event)
 
-- healthy daemon => no-op
-- stale daemon (alive PID but stale heartbeat) => stop and restart
-- missing daemon => start with `nohup`
+## 5. Pane Scanner Fallback
 
+Background goroutine (10s interval) runs `tmux list-panes -a`. For each pane:
 
-## 3.2 Single-Instance Guard
+- Running `claude`: walks `/proc` tree to find `~/.claude/sessions/<pid>.json`, assigns pane target to existing session or registers new one
+- Running `opencode`: discovers `--port` flag from `/proc/<pid>/cmdline`, registers SSE connection
 
-Daemon startup sequence:
+Handles sessions started without wrappers and server restarts while sessions are active.
 
-1. opens lock file descriptor (`exec 9>daemon.lock`)
-2. acquires non-blocking lock (`flock -n 9`)
-3. exits immediately if lock is held by another daemon
-4. writes pid file and installs exit traps
+## 6. Picker Rendering
 
+`_navigator_picker.sh` reads from state DB. Rows include a tool glyph column (󰚩 / ) between the state dot and session name.
 
-## 3.3 Heartbeat and Staleness
+View switching via fzf `--listen` + background watcher polling `@agents-gen`.
 
-Daemon writes `@opencode-daemon-ts` once per second.
+Selection routing by tool:
+- Active: navigate to tmux pane (both tools)
+- Recent Claude: `claude -r <session_id>`
+- Recent OpenCode: `opencode -s <session_id>` in session directory
 
-Health check uses:
+## 7. Process Lifecycle
 
-- pid validity (`kill -0` + `/proc/<pid>/cmdline` contains `daemon.sh`)
-- heartbeat freshness threshold (`OPENCODE_DAEMON_STALE_S`, default 20s)
+Server runs as `tmux-agents.service` (systemd user unit, `Type=exec`, `Restart=on-failure`).
 
+`agents.tmux` checks `GET /healthz` on plugin load. If unreachable, starts the service via `systemctl --user start`.
 
-## 4. Core Daemon Loop
-
-Main loop intervals (from `scripts/variables.sh`):
-
-- discovery tier: `OPENCODE_POLL_DISCOVERY_S` (default 5s)
-- metadata tier: `OPENCODE_POLL_METADATA_S` (default 30s)
-- local-map tier: `OPENCODE_POLL_LOCAL_MAP_S` (default 2s)
-- fast tier sleep: `0.1s`
-
-Loop order:
-
-1. heartbeat update
-2. discovery (if due)
-3. metadata fetch/rebuild (if due)
-4. local fallback mapping refresh (if due)
-5. fast state update (`update_pill`)
-
-
-## 5. Pane Discovery and State Detection
-
-### 5.1 Discovery Inputs
-
-Daemon scans all panes with:
-
-- `tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}'`
-
-Tracked pane categories:
-
-- local: `pane_current_command == opencode`
-- remote: `pane_current_command == ssh` **and** output resembles OpenCode TUI
-
-
-### 5.2 Remote TUI Validation
-
-For SSH panes, daemon captures pane output and checks bottom non-blank lines against pattern set:
-
-- `╹▀▀▀`
-- `ctrl+p commands`
-- `esc interrupt`
-- `Allow once`
-
-If capture fails or pattern does not match, pane is excluded from OpenCode inventory.
-
-
-### 5.3 Per-Pane Runtime State
-
-`detect_pane_state(target, cmd)` returns:
-
-- `running` if last line contains `esc interrupt`
-- `permission` if second-last or last line contains `Allow once`
-- `idle` otherwise
-- `unknown` when pane capture fails / invalid remote TUI
-
-The function is intentionally failure-tolerant: capture errors map to `unknown` rather than terminating daemon.
-
-
-## 6. Session Identity and Mapping
-
-## 6.1 Composite Identity
-
-Session metadata is keyed by composite `(host, sid)` identity internally.
-
-Implementation detail:
-
-- key format: `<host><US><sid>` where `US` is ASCII unit-separator (`0x1f`)
-
-This avoids cross-host SID collision bugs and allows host-scoped recent/history behavior.
-
-
-## 6.2 Local Pane -> Session Mapping
-
-Exact mapping path:
-
-1. walk process tree under pane pid (children + grandchildren)
-2. locate `opencode` process
-3. parse null-delimited `/proc/<pid>/cmdline`
-4. extract `-s/--session` argument
-
-Fallback path for plain `opencode` (without `-s`):
-
-- choose newest session in same `pane_current_path` from local DB
-- avoid reusing local SID already mapped to another pane in current cycle
-
-
-## 6.3 Remote Pane -> Session Mapping
-
-Default behavior: `unbound` unless exact binding exists.
-
-Resolution order:
-
-1. load exact mappings from `remote-bindings.tsv`
-2. apply only when pane target still resolves to same remote host
-3. if no exact mapping exists:
-   - default `@opencode-remote-binding-mode=unbound`: leave SID empty
-   - optional legacy `latest`: bind one unbound pane per host to newest remote row
-
-This design prevents silent wrong-session assumptions by default.
-
-
-## 7. Metadata Ingestion
-
-## 7.1 Local Metadata Source
-
-Local DB path:
-
-- `$OPENCODE_DB_PATH`
-- default: `~/.local/share/opencode/opencode.db`
-
-Queries:
-
-- active local session rows for mapped local SIDs
-- recent local rows ordered by `time_updated DESC LIMIT 21`
-
-
-## 7.2 Remote Metadata Source
-
-Per unique host alias, daemon runs async ssh query:
-
-- remote command: sqlite query against `~/.local/share/opencode/opencode.db`
-- query result: newest 21 sessions by `time_updated`
-
-SSH behavior:
-
-- `BatchMode=yes`
-- `ConnectTimeout=@opencode-ssh-connect-timeout` (default 3)
-- `StrictHostKeyChecking=@opencode-ssh-strict-host-key-checking` (default `accept-new`)
-
-Remote polling can be disabled via `@opencode-remote-polling`.
-
-
-## 8. Snapshot Build Pipeline
-
-Each metadata cycle produces two snapshots:
-
-1. `panes` snapshot
-   - includes every known pane target
-   - enriches with `sid/title/dir/updated` when mapped
-   - includes live `state`
-
-2. `recent` snapshot
-   - constructed from metadata map minus active session keys
-   - sorted by `updated DESC`
-   - top 20 retained
-   - context dedupe excludes entries matching active `host|dir|title`
-
-Change detection:
-
-- daemon compares SQL snapshot payloads to previous payloads
-- on change: writes DB snapshot and bumps `@opencode-gen`
-- unchanged snapshots are skipped
-
-Fast tier (`update_pill`) can also update pane snapshot and generation when only pane states changed.
-
-
-## 9. Picker Rendering and Interaction
-
-## 9.1 Render Sources
-
-`_navigator_picker.sh` reads from state DB only:
-
-- Active: select all from `panes`
-- Recent: select top 20 from `recent` by `updated DESC`
-
-Rows are rendered with fixed-width columns and ANSI colors derived from tmux theme options.
-
-
-## 9.2 View Switching and Reload
-
-Interactive picker uses `fzf --listen`.
-
-- left/right keys toggle mode via mode file (`active` / `recent`)
-- background watcher polls `@opencode-gen` every 100ms
-- generation change triggers a reload for current mode
-
-
-## 9.3 Selection Behavior
-
-Active row:
-
-- select corresponding tmux pane/session (`select-window`, `select-pane`, `switch-client`)
-
-Recent local row:
-
-- if current pane is local shell in same normalized dir: send `opencode -s <sid>` in place
-- else open new window (prefer `-c <dir>` when directory exists)
-
-Recent remote row:
-
-- if current pane is SSH to same host: send command in place
-- else open new SSH window (prefer tmux session previously associated with host)
-- on in-place reuse or new-window launch, persist exact `<target, host, sid>` mapping
-
-Selection key encoding:
-
-- recent keys are `recent|base64(host)|base64(sid)|base64(tmux_session)`
-- avoids delimiter breakage from `:` or `|` in host/session labels
-
-
-## 10. Status Rendering
-
-`scripts/status.sh`:
-
-1. ensures daemon is running/healthy
-2. reads `@opencode-pill`
-3. emits a compact status segment
-
-Color logic:
-
-- no sessions (`count=0`) => plain white icon/count
-- permission present => yellow pill
-- running present => green pill
-- otherwise => white pill
-
-
-## 11. Safety and Failure Semantics
-
-Key robustness mechanisms:
-
-- non-fatal handling for pane capture failures (`unknown` state)
-- stale daemon replacement using heartbeat + PID checks
-- single-instance lock with `flock`
-- transactional DB writes to avoid half-written snapshots
-- default remote unbound mode to avoid wrong-session auto-binding
-- host-key policy is explicit/configurable (no hardcoded `StrictHostKeyChecking=no`)
-
-Known hard assumptions:
-
-- Linux `/proc` for process introspection
-- `flock` availability
-- `sqlite3`, `tmux`, `ssh`, `fzf`, `bash`
-
-
-## 12. Data Flow Summary (End-to-End)
-
-1. User loads plugin or opens popup/status => daemon health check runs.
-2. Daemon discovers panes and metadata on polling schedule.
-3. Daemon writes canonical snapshots to state DB and bumps generation on change.
-4. Picker watcher sees generation change and reloads view from DB.
-5. User selects an entry:
-   - active => pane navigation
-   - recent => launch/reuse command
-6. Remote launch/reuse writes exact pane binding file.
-7. Next metadata cycle consumes binding and enriches pane rows with exact SID metadata.
-
-
-## 13. Relevant Tunables
-
-tmux user options:
-
-- `@opencode-popup-key`
-- `@opencode-popup-width`
-- `@opencode-popup-height`
-- `@opencode-popup-border`
-- `@opencode-popup-bg`
-- `@opencode-popup-fg`
-- `@opencode-auto-status-right`
-- `@opencode-remote-polling`
-- `@opencode-remote-binding-mode` (`unbound` or `latest`)
-- `@opencode-ssh-connect-timeout`
-- `@opencode-ssh-strict-host-key-checking`
-
-Environment variables:
-
-- `OPENCODE_STATE_DIR`
-- `OPENCODE_STATE_DB_PATH`
-- `OPENCODE_DB_PATH`
+Graceful shutdown on SIGTERM: stops HTTP listener, cancels all SSE goroutines, writes final state, closes DB.

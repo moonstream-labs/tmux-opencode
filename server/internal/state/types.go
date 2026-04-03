@@ -1,0 +1,38 @@
+package state
+
+type Tool string
+
+const (
+	ToolClaude   Tool = "claude"
+	ToolOpenCode Tool = "opencode"
+)
+
+type SessionState string
+
+const (
+	StateIdle       SessionState = "idle"
+	StateRunning    SessionState = "running"
+	StatePermission SessionState = "permission"
+	StateUnknown    SessionState = "unknown"
+)
+
+type PaneRow struct {
+	Target    string
+	Tool      Tool
+	State     SessionState
+	SessionID string
+	Name      string
+	Dir       string
+	Updated   int64
+	Host      string
+}
+
+type RecentRow struct {
+	Tool        Tool
+	SessionID   string
+	Name        string
+	Dir         string
+	Updated     int64
+	Host        string
+	TmuxSession string
+}

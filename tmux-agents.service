@@ -1,0 +1,13 @@
+[Unit]
+Description=tmux-agents status server
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/tmux-agent-server
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target
